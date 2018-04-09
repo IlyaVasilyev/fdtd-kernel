@@ -1,6 +1,7 @@
 #ifndef _FDTD3DSHARED_H_
 #define _FDTD3DSHARED_H_
 
+
 #define SCALARIDX 0
 
 #define RADIUS_SHARED 4
@@ -193,6 +194,7 @@ struct FieldComponents : FieldComponentsBase
 };
 
 typedef structUpdateCoefficients UpdateCoefficients_t;
+// TODO : Rename `FieldComponents_t' into `EHD_t':
 //typedef for __device__ variables:
 typedef FieldComponentsBase FieldComponents_t;
 
@@ -202,7 +204,7 @@ typedef void ( *Curl_t ) ( float&, xyz_t, int, int, int );
 
 struct TFSFstruct
 {
-  float *sinsrc;
+  xyz_t **sinsrc;
   void ( *getTFSF ) ( int, int, int );
 }
 
@@ -230,5 +232,6 @@ inline void fdtdRefFieldPMLVolume ( xyz_t &A, xyz_t F, f3_t &IC, float &C, struc
 // H and D
 // Call for both device and host
 inline void fdtdRefSingleXY ( int xa, int xb, int ya, int yb, int &ix, int &iy, FieldComponents_t &FCout, FieldComponents_t &FCin, UpdateCoefficients_t &UC, f3_t &ICA, f3_t &ICB, float &C, int iz, int &il, int ilMin, fdtdRefField_t fdtdRFH, fdtdRefField_t fdtdRFD );
+
 
 #endif

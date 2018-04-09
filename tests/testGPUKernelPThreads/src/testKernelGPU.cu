@@ -134,10 +134,10 @@ void * reloadGlobal2SharedMemSlice ( void *arguments )
   return NULL;
 }
 
-// TODO : IMPORTANT !!!                       \
+// TODO : IMPORTANT !!!                              \
 // (DONE) Figure out why is there are two arguments: \
-//  `maxChunks' and `maxGlobChunks' -         \
-//  are they duplicates?                       
+//  `maxChunks' and `maxGlobChunks' -                \
+//  are they duplicates?                              
 // TODO (DONE) : What difference betweeen `sliceSize' and `dimSlice'
 
 // `input' and `output' should never be const parameters - \

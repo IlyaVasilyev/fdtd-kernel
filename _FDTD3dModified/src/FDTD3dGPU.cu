@@ -9,6 +9,7 @@
  *
  */
 
+
 #include "FDTD3dShared.h"
 #include "FDTD3dGPU.h"
 
@@ -18,7 +19,17 @@
 #include <helper_functions.h>
 #include <helper_cuda.h>
 
+
+// TODO : Move these defs below somewhere else PLEASE !!!
+#define float3darray_t(TYPEDEFNAME, DIMI, DIMJ, DIMK) float TYPEDEFNAME[DIMI][DIMJ][DIMK]
+#define float2darray_t(TYPEDEFNAME, DIMJ, DIMK) float TYPEDEFNAME[DIMJ][DIMK]
+typedef float3darray_t(f3da_t,RADIUS_SHARED,VOLUME_SHARED,VOLUME_SHARED);
+typedef float2darray_t(f2da_t,VOLUME_SHARED,VOLUME_SHARED);
+
 // TODO : Figure out what is `padding'.
+
+cudaEvent_t *eventReadWrite;
+cudaStream_t streamCopyH2D, streamCopyD2H, streamCalc, streamMain;
 
 void *launchKernelPThreadAsync ( void *arguments )
 {
@@ -29,22 +40,109 @@ void *launchKernelPThreadAsync ( void *arguments )
   return NULL;
 }
 
-void *reloadGlobal2SharedMemChunk ( void *arguments )
+void * reloadGlobal2SharedMemSlice ( void *arguments )
 {
-  ReloadMemChunkArgs_t * &args = arguments;
+  ReloadMemChunkArgs_t &args = *((ReloadMemChunkArgs_t *)arguments);
 
-  while ( bReadyForNewSharedMemoryChunk[args.idxGrid] ) {}
-  checkCudaErrors(cudaMemcpyAsync(args.output, &((GridMap_t *)args.bufferSrc)[args.idxGrid], args.volumeSize * sizeof(float), cudaMemcpyDeviceToHost));
-  checkCudaErrors(cudaMemcpyAsync(&((GridMap_t *)(args.bufferIn + args.padding))[args.idxGrid], args.input, args.volumeSize * sizeof(float), cudaMemcpyHostToDevice));
+  const float * &srcBuffer = args.bufferSrc;
+                 /* dimensions : [args.maxChunks][args.dimSlice] */
 
+  float * &dstBuffer = args.bufferDst,
+           /* dimensions : [args.maxChunks][args.dimSlice] */
+        * &ioBuffer  = args.ioBuffer;
+           /* dimensions : [args.dimSlice] */
+
+#ifdef DEBUG_INFO
+
+  unsigned char * &debugFlags = args.debugFlags;
+
+  debugFlags[args.idxSlice] = 1;
+
+#endif
+
+  // TODO (DONE) : FIX CRITICAL ERROR : Loop does not count \
+  //                                     timesteps:          
+  // TODO : Verify that there are no more reference-value        \
+  //         initializations in threads, launched from loop with \
+  //         variable parameters:                                 
+  for ( int timestep = 0; timestep < args.timesteps; timestep++ )
+  {
+    for ( int idxChunk = 0; idxChunk < args.maxChunks; idxChunk++ )
+    {
+      /* STEP2 : Waiting until current slice will be reloaded. */
+      // TODO : Rename to `...WaitWhileRefreshing...':
+      while ( args.hostWait4RefreshGlobalSlice[args.idxSlice] ) {}
+
+      // TODO : Figure out where this should be:
+      /*
+      checkCudaErrors ( cudaEventRecord ( eventReadWrite[args.idxSlice], \
+                                          streamCopyD2H                  \
+                      )                 );                                
+      */
+
+      // TODO (DONE) : Verify if this is copying stream and \
+      //                NOT calculating stream:              
+      checkCudaErrors ( cudaMemcpyAsync                                 \
+                        (                                               \
+                          &dstBuffer[args.chunkSize * idxChunk          \
+                                     + args.sliceSize * args.idxSlice], \
+                          &ioBuffer[args.sliceSize * args.idxSlice],    \
+                          args.sliceSize * sizeof ( float ),            \
+                          cudaMemcpyDeviceToHost,                       \
+                          streamCopyD2H                                 \
+                        )                                               \
+                      );                                                 
+
+      /* STEP15 : Pausing sream `streamCopyH2D' while waiting each stream */
+      /*           `streamCopyD2H' copying date from device back to host. */
+      checkCudaErrors ( cudaEventRecord ( eventReadWrite[args.idxSlice], \
+                                          streamCopyD2H                  \
+                      )                 );                                
+      checkCudaErrors ( cudaStreamWaitEvent              \
+                        (                                \
+                          streamCopyH2D,                 \
+                          eventReadWrite[args.idxSlice], \
+                          0                              \
+                        )                                \
+                      );                                  
+
+      // 4.04.16 - fixed idxChunk to idxChunk + 1
+      /* STEP16 : Copying new data to device in specific memory location of */
+      /*           each slice.                                              */
+      // TODO : Optimize two IFs below:
+      if ( idxChunk < args.maxChunks - 1 )
+        // TODO (DONE) : Verify if this is copying stream and \
+        //                NOT calculating stream!!!            
+        checkCudaErrors ( cudaMemcpyAsync                                 \
+                          (                                               \
+                            &ioBuffer[args.sliceSize * args.idxSlice],    \
+                            &srcBuffer[args.chunkSize * (idxChunk+1)      \
+                                       + args.sliceSize * args.idxSlice], \
+                            args.sliceSize * sizeof ( float ),            \
+                            cudaMemcpyHostToDevice,                       \
+                            streamCopyH2D                                 \
+                          )                                               \
+                        );                                                 
+      if ( idxChunk == args.maxChunks )
+        // TODO (DONE) : Verify if this is copying stream and \
+        //                NOT (!!!) calculating stream:        
+        // Returning to the first chunk for another timestep:
+        checkCudaErrors ( cudaMemcpyAsync                               \
+                          (                                             \
+                            &ioBuffer[args.sliceSize * args.idxSlice],  \
+                            &dstBuffer[args.sliceSize * args.idxSlice], \
+                            args.sliceSize * sizeof ( float ),          \
+                            cudaMemcpyHostToDevice,                     \
+                            streamCopyH2D                               \
+                          )                                             \
+                        );                                               
+
+      /* STEP17 : Resetting flag to "wait" condition. */
+      args.hostWait4RefreshGlobalSlice[args.idxSlice] = 1;
+    }
+  }
   return NULL;
 }
-
-// TODO : Move these defs below somewhere else PLEASE !!!
-#define float3darray_t(TYPEDEFNAME, DIMI, DIMJ, DIMK) float TYPEDEFNAME[DIMI][DIMJ][DIMK]
-#define float2darray_t(TYPEDEFNAME, DIMJ, DIMK) float TYPEDEFNAME[DIMJ][DIMK]
-typedef float3darray_t(f3da_t,RADIUS_SHARED,VOLUME_SHARED,VOLUME_SHARED);
-typedef float2darray_t(f2da_t,VOLUME_SHARED,VOLUME_SHARED);
 
 __host__ __device__ inline float getFDTDTFSFsrcNull ( int enumXY, int ix, int iy, int iz )
 {
@@ -91,19 +189,52 @@ __host__ __device__ inline void fdtdRefCurlZH ( float &C, xyz_t F, int ix, int i
   C = ( F.Y[ix][iy][iz] - F.Y[ix - 1][iy][iz] ) / dx - ( F.X[ix][iy][iz] - F.X[ix][iy - 1][iz] ) / dy;
 }
 
-// H and D; D Media and Volume
-// RENAME THIS FUNCTION TO SOMETHING LIKE `fdtdRefFieldCOMMON' and remove `Wrapper' from function with the name `...Wrapper' below after this one.
-__host__ __device__ inline void fdtdRefFieldWindowMedia ( xyz_t &A, xyz_t F, f3_t &IC, float &C, float Xm1C, float Xm2C, float Ym1C, float Ym2C, float Zm2C, float Zm3C, int ix, int iy, int iz, Curl_t curlx, Curl_t curly, Curl_t curlz, TFSF_t TFSFsrc )
+// TODO : I AM HERE (29.09.16) : Solve the problem with shared memory   \
+//                                indexes, select either structured or  \
+//                                raw allocation (for both constant and \
+//                                shared memory):                        
+// TODO (DONE) : IMPORTANT : Insert `__syncthreads()' in this function, \
+//                            because it needed by threads, accessing   \
+//                            (reading and writing back) shared memory  \
+//                            `A' and `F' (which are the same memory    \
+//                            addresses):                                
+// TODO : RENAME THIS FUNCTION TO SOMETHING LIKE `fdtdRefFieldCOMMON' and \
+//         remove "Wrapper" from function with the name `...Wrapper'      \
+//         below after this one:                                           
+// H and D; D Media and Volume:
+__host__ __device__ inline void fdtdRefFieldWindowMedia                     \
+                                (                                           \
+                                  xyz_t &A, xyz_t F, f3_t &IC,              \
+                                  float &C, float &fA,                      \
+                                  float Xm1C, float Xm2C,                   \
+                                  float Ym1C, float Ym2C,                   \
+                                  float Zm2C, float Zm3C,                   \
+                                  int ix, int iy, int iz,                   \
+                                  Curl_t curlx, Curl_t curly, Curl_t curlz, \
+                                  TFSF_t TFSFsrc                            \
+                                )                                            
 {
   (*curlx) ( C, F, ix, iy, iz );
   C += (*TFSFsrc) ( YSRC, ix, iy, iz ) / dz;
-  A.X[ix][iy][iz] = Xm1C * F.X[ix][iy][iz] + Xm2C * C;
+  fA = Xm1C * F.X[ix][iy][iz] + Xm2C * C;
+  __syncthreads();
+  A.X[ix][iy][iz] = fA;
+  __syncthreads();
   (*curly) ( C, F, ix, iy, iz );
   C += (*TFSFsrc) ( XSRC, ix, iy, iz ) / dz;
-  A.Y[ix][iy][iz] = Ym1C * F.Y[ix][iy][iz] + Ym2C * C;//check this here
+  fA = Ym1C * F.Y[ix][iy][iz] + Ym2C * C;
+  __syncthreads();
+  A.Y[ix][iy][iz] = fA;  // Check this here.
+  __syncthreads();
   (*curlz) ( C, F, ix, iy, iz );
-  IC[ix][iy][iz] += C;// IC should be different for H, D, E fields and their components
-  A.Z[ix][iy][iz] = F.Z[ix][iy][iz] + Zm2C * C + Zm3C * IC[ix][iy][iz];// Zm3C Should be ZERO (!) if called from any other fdtdRefFieldWindow....
+  // `IC' should be different for H, D, E fields and their components:
+  IC[ix][iy][iz] += C;
+  // `Zm3C' Should be ZERO (!) if called from any other \
+  //  `fdtdRefFieldWindow...':                           
+  fA = F.Z[ix][iy][iz] + Zm2C * C + Zm3C * IC[ix][iy][iz];
+  __syncthreads();
+  A.Z[ix][iy][iz] = fA;
+  __syncthreads();
 }
 
 //Function call wrapper for scalar update parameters
@@ -162,10 +293,32 @@ inline void fdtdRefFieldPMLMediaH ( xyz_t &A, xyz_t F, f3_t &IC, float &C, struc
   fdtdRefFieldWindowMedia ( A, F, IC, C, ((HXYM01_t &)Xm1C).PML.Media[il], ((HXYM2_t &)Xm2C).PML.Media[il], ((HXYM01_t &)Ym1C).PML.Media[il], ((HXYM2_t &)Ym2C).PML.Media[il], ((HZM2_t &)Zm2C).PML.Media[il], ((HZM3_t &)Zm3C).PML.Media[il], ix, iy, iz, &fdtdRefCurlXE, &fdtdRefCurlYE, &fdtdRefCurlZE, TFSFsrc );
 }
 
-// D PML Media and Volume; overloadng of fdtdRefFieldPMLMedia
-inline void fdtdRefFieldPMLMediaD ( xyz_t &A, xyz_t F, f3_t &IC, float &C, structSpaceUpdateCoefficientsBase_NonTemplate Xm1C, structSpaceUpdateCoefficientsBase_NonTemplate Xm2C, structSpaceUpdateCoefficientsBase_NonTemplate Ym1C, structSpaceUpdateCoefficientsBase_NonTemplate Ym2C, structSpaceUpdateCoefficientsBase_NonTemplate Zm2C, structSpaceUpdateCoefficientsBase_NonTemplate Zm3C, int ix, int iy, int iz, int il, int ia, int ib, TFSF_t TFSFsrc )
+// D PML Media and Volume; overloadng of `fdtdRefFieldPMLMedia':
+inline void fdtdRefFieldPMLMediaD                                 \
+            (                                                     \
+              xyz_t &A, xyz_t F, f3_t &IC, float &C,              \
+              structSpaceUpdateCoefficientsBase_NonTemplate Xm1C, \
+              structSpaceUpdateCoefficientsBase_NonTemplate Xm2C, \
+              structSpaceUpdateCoefficientsBase_NonTemplate Ym1C, \
+              structSpaceUpdateCoefficientsBase_NonTemplate Ym2C, \
+              structSpaceUpdateCoefficientsBase_NonTemplate Zm2C, \
+              structSpaceUpdateCoefficientsBase_NonTemplate Zm3C, \
+              int ix, int iy, int iz,                             \
+              int il, int ia, int ib,                             \
+              TFSF_t TFSFsrc                                      \
+            )                                                      
 {
-  fdtdRefFieldWindowMedia ( A, F, IC, C, ((DXYM01_t &)Xm1C).PML.Media[il], ((DXYM2_t &)Xm2C).PML.Media[il], ((DXYM01_t &)Ym1C).PML.Media[il], ((DXYM2_t &)Ym2C).PML.Media[il], ((DZM2_t &)Zm2C).PML.Media[SCALARIDX], ((DZM3_t &)Zm3C).PML.Media[il], ix, iy, iz, &fdtdRefCurlXH, &fdtdRefCurlYH, &fdtdRefCurlZH, TFSFsrc );
+  fdtdRefFieldWindowMedia ( A, F, IC, C,                                    \
+                            ((DXYM01_t &)Xm1C).PML.Media[il],               \
+                            ((DXYM2_t &)Xm2C).PML.Media[il],                \
+                            ((DXYM01_t &)Ym1C).PML.Media[il],               \
+                            ((DXYM2_t &)Ym2C).PML.Media[il],                \
+                            ((DZM2_t &)Zm2C).PML.Media[SCALARIDX],          \
+                            ((DZM3_t &)Zm3C).PML.Media[il],                 \
+                            ix, iy, iz,                                     \
+                            &fdtdRefCurlXH, &fdtdRefCurlYH, &fdtdRefCurlZH, \
+                            TFSFsrc                                         \
+                          );                                                 
 }
 
 //H
@@ -174,50 +327,112 @@ inline void fdtdRefFieldPMLVolumeH ( xyz_t &A, xyz_t F, f3_t &IC, float &C, stru
   fdtdRefFieldWindowMedia ( A, F, IC, C, ((HXYM01_t &)Xm1C).PML.Media[il]/*check if media instead of volume!!*/, ((f3da_t &)(((HXYM2_t &)Xm2C).PML.Volume))[il][ia][ib], ((HXYM01_t &)Ym1C).PML.Media[il]/*same note here!!!*/, ((f3da_t &)(((HXYM2_t &)Ym2C).PML.Volume))[il][ia][ib], ((f2da_t &)(((HZM2_t &)Zm2C).PML.Volume))[ia][ib], ((f3da_t &)(((HZM3_t &)Zm3C).PML.Volume))[il][ia][ib], ix, iy, iz, &fdtdRefCurlXE, &fdtdRefCurlYE, &fdtdRefCurlZE, TFSFsrc );
 }
 
-// H and D
-// Call for both device and host
-__host__ __device__ inline void fdtdRefSingleXY ( int xa, int xb, int ya, int yb, int &ix, int &iy, FieldComponents_t &FCout, FieldComponents_t &FCin, UpdateCoefficients_t &UC, f3_t &ICA, f3_t &ICB, float &C, int iz, int &il, int ilMin, fdtdRefField_t fdtdRFH, fdtdRefField_t fdtdRFD, TFSF_t TFSFsrcE, TFSF_t TFSFsrcH )
+// H and D:
+// Function for both device and host:
+__host__ __device__ inline void fdtdRefSingleXY                    \
+                                (                                  \
+                                  int xa, int xb, int ya, int yb,  \
+                                  int &ix, int &iy,                \
+                                  FieldComponents_t &FCout,        \
+                                  FieldComponents_t &FCin,         \
+                                  UpdateCoefficients_t &UC,        \
+                                  f3_t &ICA, f3_t &ICB,            \
+                                  float &C, float &F,              \
+                                  int iz, int &il, int ilMin,      \
+                                  fdtdRefField_t fdtdRFH,          \
+                                  fdtdRefField_t fdtdRFD,          \
+                                  TFSF_t TFSFsrcE, TFSF_t TFSFsrcH \
+                                )                                   
 {
-  (*fdtdRFH) ( FCout.H, FCin.H, ICA, C, UC.H.X.m1, UC.H.X.m2, UC.H.Y.m1, UC.H.Y.m2, UC.H.Z.m2, UC.H.Z.m3, ix, iy, iz, il - ilMin, ix - xa, iy - ya, TFSFsrcE );
-  (*fdtdRFD) ( FCout.D, FCin.D, ICB, C, UC.D.X.m1, UC.D.X.m2, UC.D.Y.m1, UC.D.Y.m2, UC.D.Z.m2, UC.H.Z.m3, ix, iy, iz, il - ilMin, ix - xa, iy - ya, TFSFsrcH );
+  // TODO : FIX A POSSIBLE ERROR : Both functions receive same parameters \
+  //                                with iy-ya and ix-ia, and there is no \
+  //                                xb and yb variables:                   
+  (*fdtdRFH) ( FCout.H, FCin.H, ICA, C, F,                 \
+               UC.H.X.m1, UC.H.X.m2, UC.H.Y.m1, UC.H.Y.m2, \
+               UC.H.Z.m2, UC.H.Z.m3,                       \
+               ix, iy, iz,                                 \
+               il - ilMin, ix - xa, iy - ya,               \
+               TFSFsrcE                                    \
+             );                                             
+  (*fdtdRFD) ( FCout.D, FCin.D, ICB, C, F,                 \
+               UC.D.X.m1, UC.D.X.m2, UC.D.Y.m1, UC.D.Y.m2, \
+               UC.D.Z.m2, UC.H.Z.m3,                       \
+               ix, iy, iz,                                 \
+               il - ilMin, ix - xa, iy - ya,               \
+               TFSFsrcH                                    \
+             );                                             
 }
 
-// TODO : transform all those functions to class methods with members instead of a function parameters. Use xisting struct declarations in FDTD3dShared.h
-__device__ inline void fdtdRef4SingleXY ( int xhalfpre, int xhalfpost, int yhalfpre, int yhalfpost, int dimx, int dimy, int &ix, int &iy, FieldComponents_t &FCout, FieldComponents_t &FCin, UpdateCoefficients_t &UC, f3_t &ICA, f3_t &ICB, float &C, int iz, int il, fdtdRefField_t fdtdRFH, fdtdRefField_t fdtdRFD, TFSF_t TFSFsrcE, TFSF_t TFSFsrcH )
+// TODO : Transform all those functions into class methods with members      \
+//         instead of a function parameters. Use xisting struct declarations \
+//         in FDTD3dShared.h:                                                 
+__device__ inline void fdtdRef4SingleXY                                  \
+                       ( int xhalfpre, int xhalfpost,                    \
+                         int yhalfpre, int yhalfpost,                    \
+                         int dimx, int dimy,                             \
+                         int &ix, int &iy,                               \
+                         FieldComponents_t &FCout,                       \
+                         FieldComponents_t &FCin,                        \
+                         UpdateCoefficients_t &UC,                       \
+                         f3_t &ICA, f3_t &ICB,                           \
+                         float &C, float &F,                             \
+                         int iz, int il,                                 \
+                         fdtdRefField_t fdtdRFH, fdtdRefField_t fdtdRFD, \
+                         TFSF_t TFSFsrcE, TFSF_t TFSFsrcH                \
+                       )                                                  
 {
-  fdtdRefSingleXY ( 0, xhalfpre, 0, dimy, ix, iy, FCout, FCin, UC, ICA, ICB, C, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
-  fdtdRefSingleXY ( xhalfpost, dimx, 0, dimy, ix, iy, FCout, FCin, UC, ICA, ICB, C, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
-  fdtdRefSingleXY ( xhalfpre, xhalfpost, 0, yhalfpre, ix, iy, FCout, FCin, UC, ICA, ICB, C, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
-  fdtdRefSingleXY ( xhalfpre, xhalfpost, yhalfpost, dimy, ix, iy, FCout, FCin, UC, ICA, ICB, C, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
+  fdtdRefSingleXY ( 0, xhalfpre, 0, dimy, ix, iy, FCout, FCin, UC, ICA, ICB, C, F, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
+  fdtdRefSingleXY ( xhalfpost, dimx, 0, dimy, ix, iy, FCout, FCin, UC, ICA, ICB, C, F, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
+  fdtdRefSingleXY ( xhalfpre, xhalfpost, 0, yhalfpre, ix, iy, FCout, FCin, UC, ICA, ICB, C, F, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
+  fdtdRefSingleXY ( xhalfpre, xhalfpost, yhalfpost, dimy, ix, iy, FCout, FCin, UC, ICA, ICB, C, F, iz, il, 0, fdtdRFH, fdtdRFD, TFSFsrcE, TFSFsrcH );
 }
 
 #include "FDTD3dGPUKernel.cuh"
 
-bool getTargetDeviceGlobalMemSize ( int *totalblockspermp, int *totalthreadspermp, int *totalmps, memsize_t *totalmem, const int argc, const char **argv )
+// TODO : Rename `getTargetDeviceGlobalMemSize' \
+//         to `getTargetDeviceProperties':       
+// TODO : Use references `&' instead of pointers `*' for all \
+//         returned arguments:                                
+bool getTargetDeviceProperties ( int *totalblockspermp,  \
+                                 int *totalthreadspermp, \
+                                 int *totalmps,          \
+                                 memsize_t *totalmem,    \
+                                 int &maxTotalThreads,   \
+                                 const int argc,         \
+                                 const char **argv       \
+                               )                          
 {
-    int               deviceCount  = 0;
-    int               targetDevice = 0;
-    int               mpcount      = 0;
-    int               mpresthreads = 0;
-    size_t            memsize      = 0;
+    int    deviceCount  = 0;
+    int    targetDevice = 0;
+    int    mpcount      = 0;
+    int    mpresthreads = 0;
+    size_t memsize      = 0;
 
-    // Get the number of CUDA enabled GPU devices
+    // Get the number of CUDA enabled GPU devices:
     printf(" cudaGetDeviceCount\n");
     checkCudaErrors(cudaGetDeviceCount(&deviceCount));
 
-    // Select target device (device 0 by default)
+    // Select target device (device 0 by default):
     targetDevice = findCudaDevice(argc, (const char **)argv);
 
-    // Query target device for maximum memory allocation
+    // Query target device for maximum memory allocation:
     printf(" cudaGetDeviceProperties\n");
     struct cudaDeviceProp deviceProp;
     checkCudaErrors(cudaGetDeviceProperties(&deviceProp, targetDevice));
+
+    // Query target device maximum number of concurrent threads:
+    CUresult error = cuDeviceGetAttribute                                  \
+                     (                                                     \
+                       &maxTotalThreads,                                   \
+                       CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, \
+                       targetDevice                                        \
+                     );                                                     
 
     memsize = deviceProp.totalGlobalMem;
     mpcountt = deviceProp.multiProcessorCount;
     mpresthreads = deviceProp.maxThreadsPerMultiProcessor;
 
-    // Save the results
+    // Save the results:
     *totalmem = (memsize_t)memsize;
     *totalmps = mpcount;
     *totalthreadspermp = mpresthreads;
@@ -236,28 +451,153 @@ bool getTargetDeviceGlobalMemSize ( int *totalblockspermp, int *totalthreadsperm
     return true;
 }
 
-bool fdtdGPU(float *output, const float *input, const float *coeff, const int dimx, const int dimy, const int dimz, const int radius, const int timesteps, const int argc, const char **argv, int blockSize, int blockXSize)
+void constrainCompUnitDims ( int &userUnitSize,
+                             int dimInternalX, int dimInternalY,
+                             const int unitDimX, const int unitDimY,
+                             const int unitDimYMax,
+                             const int unitSizeMax, const int unitSizeMin,
+                             dim3 &unitDims,
+                             int maxCudaUnitSize,
+                             int minInternalUnitSize,
+                             int argc, char **argv, char *arg_name
+                           )
 {
-    const int         outerDimx  = dimx + 2 * radius;
-    const int         outerDimy  = dimy + 2 * radius;
-    const int         outerDimz  = dimz + 2 * radius;
-    const size_t      volumeSize = outerDimx * outerDimy * outerDimz;
-    int               deviceCount  = 0;
-    int               targetDevice = 0;
-    float            *bufferOut    = 0;
-    float            *bufferIn     = 0;
-    dim3              dimBlock;
-    dim3              dimGrid;
+  // TODO : Ensure that all constants have proper values          \
+  //         for maximum number of available computational units:  
+  // Check for a command-line specified unit size:
+  if ( !checkCmdLineFlag ( argc, (const char **)argv, arg_name ) )
+    userUnitSize = dimInternalX * dimInternalY;
+  else
+    userUnitSize = getCmdLineArgumentInt ( argc, argv, arg_name );
 
-    // Ensure that the inner data starts on a 128B boundary
-    const int padding = (128 / sizeof(float)) - radius;
-    const size_t paddedVolumeSize = volumeSize + padding;
+  // Constrain to a multiple of unitDimX:
+  userUnitSize = userUnitSize/unitDimX * unitDimX;
+
+  // Set the unit size:
+  unitDims.x = dimInternalX;
+
+  // Constrain within allowed bounds:
+  if ( userUnitSize < unitSizeMin )
+  {
+    userUnitSize = unitSizeMin;
+    unitDims.x = unitDimX;
+  }
+  if ( userUnitSize > unitSizeMax )
+  {
+    userUnitSize = unitSizeMax;
+    unitDims.x = unitDimX;
+  }
+
+  if ( minInternalUnitSize > 0 )
+    userUnitSize = MIN ( userUnitSize, maxCudaUnitSize );
+  else
+    userUnitSize = MIN ( minInternalUnitSize*userUnitSize, maxCudaUnitSize );
+
+  // Visual Studio 2005 does not like `std::min':
+  unitDims.y = ( (userUnitSize/unitDims.x) < (size_t)unitDimMaxY ) \
+                ? (userUnitSize/unitDims.x)                        \
+                : (size_t)unitDimY;                                 
+
+  return NULL;
+}
+
+// TODO : Change all `float *' to `FieldComponents_t *' and also \
+//         all types of related variables                        \
+//         from `float' to `FieldComponents_t':                   
+// TODO : Remove three-dimensional structures `***' \
+//         and use simple arrays `*' instead :       
+bool fdtdGPU ( int argc, char **argv,                                     \
+               const FieldComponents_t *input, FieldComponents_t *output, \
+               const FieldComponents_t *inputTFSFsrc,                     \
+               const UpdateCoefficients_t &coeffs,                        \
+               int timesteps,                                             \
+               const int radius,                                          \
+               int maxChunks, int chunkSize,                              \
+               int sliceSize, int dimSlice,                               \
+               int blockSize,                                             \
+               int dimx, int dimy, int dimz,                              \
+               int dimxBlock, int dimyBlock,                              \
+               int dimThreadsX, int dimThreadsY,                          \
+               int maxthreadspermp                                        \
+             )                                                             
+{
+  // TODO : I AM HERE - VERIFY SYNCHRONIZATION BETWEEN ALL PARALLEL STREAMS, \
+  //         THREADS, PTHREADS:                                               
+  // TODO : Move all declarations to the top of the function:
+
+  unsigned char *debugFlags;
+
+  int userBlockSize, userGridSize,
+      targetDevice = 0,
+      deviceCount  = 0;
+
+  FieldComponents_t *ioBuffer  = 0,
+                    *bufferSrc = input,
+                    *bufferDst = output;
+
+  clock_t *globalClockGPU;
+
+  dim3 dimBlock,
+       dimGrid;
+
+  const int     outerDimx  = dimx + 2 * radius;
+  const int     outerDimy  = dimy + 2 * radius;
+  const int     outerDimz  = dimz + 2 * radius;
+  const size_t  volumeSize = outerDimx * outerDimy * outerDimz;
+  int           deviceCount  = 0;
+  int           targetDevice = 0;
+
+  // Synchronization flags:
+  unsigned char *bContinue,/* byte */
+                *hostWait4RefreshingChunk_WhileLoadingSlices,/* byte */
+                *hostWaitWhileLoadingGlobalChunk,/* byte */
+                *hostWait4RefreshGlobalSlice,/* array of bytes */
+                *deviceGlobalRefreshFlags,/* array of bytes */
+                *deviceWaitWhileLoadingGlobalChunk;/* byte */
+
+  struct cudaFuncAttributes funcAttrib;
+
+  // TODO : Make sure that all fields in assigned structs are in right \
+  //         order with variable's struct fields:                       
+  // TODO : Figure out why argsCKSA does not have reference type:
+  // CKSA - Control Kernel Stream Arguments.
+  // Initialization of `argsCKSA' const members using copy constructor:
+  TestControlKernelArguments_t argsCKSA \
+  (                                     \
+    NULL, NULL, NULL, NULL, NULL, NULL, \
+    dimThreadsX, dimThreadsY,           \
+    dimSlice,                           \
+    maxChunks,                          \
+    dimxBlock,                          \
+    dimyBlock,                          \
+    timesteps                           \
+  );                                     
+  TestKernelArguments_t argsKPT                                     \
+  (                                                                 \
+    dimx, dimy, dimz,                                               \
+    dimxBlock, dimyBlock, dimSlice,                                 \
+    dimThreadsX, dimThreadsY,                                       \
+    /* TODO : Extra zdimblock dimension !!! VERIFY all           */ \
+    /*         deviceGlobalRefreshFlags and linked host flags!!! */ \
+    maxChunks,                                                      \
+    timesteps,                                                      \
+    NULL, NULL, NULL, NULL, NULL                                    \
+  );                                                                 
+  ReloadMemChunkArgs_t *argsRMC;
+
+  //pthread_t pthreadLoaders[maxChunks];
+  pthread_t pthreadLoaders[dimSlice];
+
+  // Ensure that the inner data starts on a 128B boundary
+  const int padding = (128 / sizeof(float)) - radius;
+  const size_t paddedVolumeSize = volumeSize + padding;
 
 #ifdef GPU_PROFILING
+
     cudaEvent_t profileStart = 0;
     cudaEvent_t profileEnd   = 0;
-    // In timeframe we need to advance by half-timestep due to different
-    // steps in H and D and also in E and B fields update equations
+    // In timeframe we need to advance by half-timestep due to different \
+    //  steps in H and D and also in E and B fields update equations:     
     const int profileTimesteps = 2 * timesteps - 1;
 
     if (profileTimesteps < 1)
@@ -282,87 +622,230 @@ bool fdtdGPU(float *output, const float *input, const float *coeff, const int di
 
     checkCudaErrors(cudaSetDevice(targetDevice));
 
-    // Allocate memory buffers
-    checkCudaErrors(cudaMalloc((void **)&bufferOut, paddedVolumeSize * sizeof(float)));
-    checkCudaErrors(cudaMalloc((void **)&bufferIn, paddedVolumeSize * sizeof(float)));
+#ifdef DEBUG_INFO
 
-    // Check for a command-line specified block size
-    int userBlockSize;
-
-    if ( !checkCmdLineFlag(argc, (const char **)argv, "block-size") )
-      userBlockSize = blockSize;
-
-    userBlockSize = getCmdLineArgumentInt(argc, argv, "block-size");
-    // Constrain to a multiple of k_blockDimX
-    userBlockSize = (userBlockSize / k_blockDimX * k_blockDimX);
-
-    // Constrain within allowed bounds
-    userBlockSize = MIN(MAX(userBlockSize, k_blockSizeMin), k_blockSizeMax);
-
-    // Check the device limit on the number of threads
-    struct cudaFuncAttributes funcAttrib;
-    checkCudaErrors(cudaFuncGetAttributes(&funcAttrib, FiniteDifferencesKernel));
-
-    userBlockSize = MIN(userBlockSize, funcAttrib.maxThreadsPerBlock);
-
-    // Set the block size
-    //dimBlock.x = k_blockDimX;
-    dimBlock.x = blockXSize;
-    // Visual Studio 2005 does not like std::min
-    //    dimBlock.y = std::min<size_t>(userBlockSize / k_blockDimX, (size_t)k_blockDimMaxY);
-    dimBlock.y = ((userBlockSize / k_blockDimX) < (size_t)k_blockDimMaxY) ? (userBlockSize / k_blockDimX) : (size_t)k_blockDimMaxY;
-    dimGrid.x  = (unsigned int)ceil((float)dimx / dimBlock.x);
-    dimGrid.y  = (unsigned int)ceil((float)dimy / dimBlock.y);
-    printf(" set block size to %dx%d\n", dimBlock.x, dimBlock.y);
-    printf(" set grid size to %dx%d\n", dimGrid.x, dimGrid.y);
-
-    // Check the block size is valid
-    if (dimBlock.x < RADIUS || dimBlock.y < RADIUS)
-    {
-        printf("invalid block size, x (%d) and y (%d) must be >= radius (%d).\n", dimBlock.x, dimBlock.y, RADIUS);
-        exit(EXIT_FAILURE);
-    }
-
-    // Copy the input to the device input buffer
-    checkCudaErrors(cudaMemcpy(bufferIn + padding, input, volumeSize * sizeof(float), cudaMemcpyHostToDevice));
-
-    // Copy the input to the device output buffer (actually only need the halo)
-    checkCudaErrors(cudaMemcpy(bufferOut + padding, input, volumeSize * sizeof(float), cudaMemcpyHostToDevice));
-
-    // Copy the coefficients to the device coefficient buffer
-    checkCudaErrors(cudaMemcpyToSymbol(stencil, (void *)coeff, (radius + 1) * sizeof(float)));
-
-#ifdef GPU_PROFILING
-
-    // Create the events
-    checkCudaErrors(cudaEventCreate(&profileStart));
-    checkCudaErrors(cudaEventCreate(&profileEnd));
+  debugFlags = (unsigned char *)(calloc ( dimSlice, 1 ));
 
 #endif
 
-    // Execute the FDTD
-    float *bufferSrc = bufferIn + padding;
-    float *bufferDst = bufferOut + padding;
-    printf(" GPU FDTD loop\n");
+  // Allocate memory buffers:
+  checkCudaErrors ( cudaMalloc (                                       \
+                                 (void **)&ioBuffer,                   \
+                                 chunkSize * sizeof(FieldComponents_t) \
+                  )            );                                       
+  checkCudaErrors ( cudaMalloc (                           \
+                                 (void **)&globalClockGPU, \
+                                 sizeof(clock_t)           \
+                  )            );                           
+  checkCudaErrors ( cudaMalloc (                                     \
+                                 (void **)&deviceGlobalRefreshFlags, \
+                                 dimxBlock * dimyBlock * dimSlice    \
+                                  * dimThreadsX * dimThreadsY        \
+                  )            );                                     
+  checkCudaErrors ( cudaMalloc                                     \
+                    (                                              \
+                      (void **)&deviceWaitWhileLoadingGlobalChunk, \
+                      1                                            \
+                    )                                              \
+                  );                                                
+  // If there are pinned memory required for syncronization purposes by \
+  //  many threads or concurrent blocks, then it's better to use        \
+  //  `cudaHostAlloc' with `cudaHostAllocPortable' flag rather than     \
+  //  `cudaMallocHost', because in the first case memory will be        \
+  //  considered as pinned "... by all CUDA contexts, not just the one  \
+  //  that performed the allocation."                                    
+  checkCudaErrors ( cudaHostAlloc                            \
+                    (                                        \
+                      (void **)&hostWait4RefreshGlobalSlice, \
+                      dimSlice,                              \
+                      cudaHostAllocPortable                  \
+                    )                                        \
+                  );// PINNED.                                
+  checkCudaErrors                                            \
+  (                                                          \
+    cudaHostAlloc                                            \
+    (                                                        \
+      (void **)&hostWait4RefreshingChunk_WhileLoadingSlices, \
+      1,                                                     \
+      cudaHostAllocPortable                                  \
+    )                                                        \
+  );// PINNED.                                                
+  checkCudaErrors ( cudaHostAlloc                                \
+                    (                                            \
+                      (void **)&hostWaitWhileLoadingGlobalChunk, \
+                      1,                                         \
+                      cudaHostAllocPortable                      \
+                    )                                            \
+                  );// PINNED.                                    
+  checkCudaErrors ( cudaHostAlloc           \
+                    (                       \
+                      (void **)&bContinue,  \
+                      1,                    \
+                      cudaHostAllocPortable \
+                    )                       \
+                  );// PINNED.               
+
+  checkCudaErrors ( cudaMemset ( deviceGlobalRefreshFlags,        \
+                                 0,                               \
+                                 dimxBlock * dimyBlock * dimSlice \
+                                  * dimThreadsX * dimThreadsY     \
+                  )            );                                  
+  checkCudaErrors ( cudaMemset ( deviceWaitWhileLoadingGlobalChunk, \
+                                 1, 1                               \
+                  )            );                                    
+  memset ( hostWait4RefreshGlobalSlice, 1, dimSlice );
+  // TODO : Ensure that `0' stands for "not waiting" and also that we need \
+  //         "not waiting" state from the begining of program execution in \
+  //         `hostWait4RefreshingChunk_WhileLoadingSlices'                 \
+  //         and                                                           \
+  //         `hostWaitWhileLoadingGlobalChunk'                             \
+  //         variables:                                                     
+  *hostWait4RefreshingChunk_WhileLoadingSlices = 1;
+  *hostWaitWhileLoadingGlobalChunk = 1;
+  *bContinue = 0;
+
+  // Initialization of `argsCKSA' non-const fields:
+  argsCKSA.hostWait4RefreshGlobalSlice = hostWait4RefreshGlobalSlice;
+  argsCKSA.hostWait4RefreshingChunk_WhileLoadingSlices = \
+   hostWait4RefreshingChunk_WhileLoadingSlices;           
+  argsCKSA.hostWaitWhileLoadingGlobalChunk = \
+   hostWaitWhileLoadingGlobalChunk;           
+  argsCKSA.deviceWaitWhileLoadingGlobalChunk = \
+   deviceWaitWhileLoadingGlobalChunk;           
+  argsCKSA.bContinue = bContinue;
+  argsCKSA.deviceGlobalRefreshFlags = deviceGlobalRefreshFlags;
+
+  // Check the device limit on the number of threads:
+  checkCudaErrors ( cudaFuncGetAttributes ( &funcAttrib,            \
+                                            FiniteDifferencesKernel \
+                  )                       );                         
+
+  constrainCompUnitDims ( userBlockSize, dimThreadsX , dimThreadsY, \
+                          k_blockDimX, k_blockDimY, k_blockDimMaxY, \
+                          k_blockSizeMax, k_blockSizeMin,           \
+                          dimBlock,                                 \
+                          0, funcAttrib.maxThreadsPerBlock,         \
+                          argc, argv, "block-size"                  \
+                        );                                           
+
+  constrainCompUnitDims ( userBlockSize, dimxBlock , dimyBlock,      \
+                          k_gridDimX, k_gridDimY, k_gridDimMaxY,     \
+                          k_gridSizeMax, k_gridSizeMin,              \
+                          dimGrid,                                   \
+                          0, funcAttrib.maxThreadsPerMultiProcessor, \
+                          argc, argv, "grid-size"                    \
+                        );                                            
+
+  // TODO (DONE) : Implement `k_gridDimX', `k_gridDimY', `k_gridDimMaxY', \
+  //                and etc. in the same manner as for block dimensions,  \
+  //                but be sure to include thread dimension checks        \
+  //                for the grid:                                          
+  // Check if block and grid sizes are valid:
+  if ( ( dimBlock.x < outerDimx )    \
+       || ( dimBlock.y < outerDimy ) \
+     )                                
+  {
+    printf("invalid block size, x (%d) and y (%d) must be >= radius (%d or %d).\n", dimBlock.x, dimBlock.y, outerDimx, outerDimy);
+    exit(EXIT_FAILURE);
+  }
+  if ( ( dimBlock.x * dimGrid.x <= outerDimx )    \
+       || ( dimBlock.y * dimGrid.y <= outerDimy ) \
+     )                                             
+  {
+    printf ( "invalid grid size, x (%d) and y (%d) must be >= radius (%d or %d).\n", dimBlock.x * dimGrid.x, dimBlock.y * dimGrid.y, outerDimx, outerDimy );
+    exit ( EXIT_FAILURE );
+  }
+
+  printf(" set block size to %dx%d\n", dimBlock.x, dimBlock.y);
+  printf(" set grid size to %dx%d\n", dimGrid.x, dimGrid.y);
 
 #ifdef GPU_PROFILING
-    // Enqueue start event
-    checkCudaErrors(cudaEventRecord(profileStart, 0));
+
+  // Create the events:
+  checkCudaErrors(cudaEventCreate(&profileStart));
+  checkCudaErrors(cudaEventCreate(&profileEnd));
+
 #endif
 
+  // Execute the FDTD:
+  printf(" GPU FDTD loop\n");
+
+#ifdef GPU_PROFILING
+  // Enqueue start event:
+  checkCudaErrors(cudaEventRecord(profileStart, 0));
+#endif
+
+  checkCudaErrors ( cudaStreamCreate(&streamCalc) );
+  checkCudaErrors ( cudaStreamCreate(&streamCopyH2D) );
+  checkCudaErrors ( cudaStreamCreate(&streamCopyD2H) );
+  checkCudaErrors ( cudaStreamCreate(&streamMain) );
+
+  // TODO : Ensure that all `cudaMemcpy' sources and destinations
+  //         specified correctly:
+  // Copy the input to the device input buffer:
+  checkCudaErrors ( cudaMemcpy ( ioBuffer,                                 \
+                                 (void *)bufferSrc,                        \
+                                 /* 1.04.16 - changed source and dest. */  \
+                                 chunkSize * sizeof ( FieldComponents_t ), \
+                                 cudaMemcpyHostToDevice                    \
+                  )            );                                           
+
+  lengthCoeffs = sizeof ( UpdateCoefficients_t );
+  if ( lengthCoeffs != sizeof ( updateCoeffs ) )
+  {
+    fprintf ( stderr, \
+              "Error : sizes of static type `UpdateCoefficients_t' and `updateCoeffs' differ." \
+            );
+    return 255;
+  }
+
+  // TODO : I AM HERE (30.09.16) : Implement copy operations for constant \
+  //                                coefficients:                          
+  // Copy the coefficients to the device coefficient buffer:
+  checkCudaErrors ( cudaMemcpyToSymbol ( updateCoeffs,    \
+                                         (void *)&coeffs, \
+                                         lengthCoeffs     \
+                  )                    );                  
+
+  // TODO : Multiply on correct values everywhere!!
+  //         sliceSize, chunkSize, blockSize, threadSize. etc.
+  argsKPT.bContinue = bContinue;
+  argsKPT.deviceWaitWhileLoadingGlobalChunk = \
+   deviceWaitWhileLoadingGlobalChunk;          
+  argsKPT.deviceGlobalRefreshFlags = deviceGlobalRefreshFlags;
+  argsKPT.buffer = ioBuffer;
+  argsKPT.global_now = globalClockGPU;
+
+  // TODO : Check the order of parameters:
+
+#ifdef DEBUG_INFO
+
+  argsRMC = new ReloadMemChunkArgs_t                         \
+                (                                            \
+                  maxChunks, dimSlice, sliceSize, chunkSize, \
+                  timesteps, 0,                              \
+                  bufferSrc, bufferDst, ioBuffer,            \
+                  hostWait4RefreshGlobalSlice,               \
+                  debugFlags                                 \
+                );                                            
+
+#else
+
+  argsRMC = new ReloadMemChunkArgs_t                         \
+                (                                            \
+                  maxChunks, dimSlice, sliceSize, chunkSize, \
+                  timesteps, 0,                              \
+                  bufferSrc, bufferDst, ioBuffer,            \
+                  hostWait4RefreshGlobalSlice                \
+                );                                            
+
+#endif
+
+  // TODO : I AM HERE (23.11.16) : Continue merging source code:
+
+   // TODO : Remove half-steps:
    // In timeframe we need to advance by half-timestep due to different
-   // steps in H and D and also in E and B fields update equations
-   //TODO : remove half-steps!!!!!
-
-   argsKPT = { .dimx = dimx,\
-               .dimy = dimy,\
-               .dimz = dimz,\
-               .input = input,\
-               .dimGrid = dimGrid,\
-               .dimBlock = dimBlock,\
-               .maxSharedMemPerBlock = maxSharedMemPerBlock; \
-               .output = output; };
-
+   //  steps in H and D and also in E and B fields update equations:
    for (int ihalft = 0 ; ihalft < 2 * timesteps ; ihalft++)
     {
         printf("\tt = %d ", ihalft);

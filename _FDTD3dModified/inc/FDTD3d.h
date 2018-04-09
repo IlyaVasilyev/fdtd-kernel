@@ -43,5 +43,6 @@ typedef float float3x3Tens_t[3][3];
 
 float getSpeedOfLight ( void );
 float getWGLength ( void );
+ getSinSourceSignal ( void );
 
 #endif

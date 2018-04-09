@@ -57,7 +57,7 @@ bool runTest(int argc, char **argv)
             dimz = threadSize,
             blockSize = maxThreads * threadSize,
             // `threadSize' - thread length in z direction.
-            //32768 bytes of shared memory per thread block
+            // 32768 bytes of shared memory per thread block
             dimSlice = 4,
             sliceSize = maxBlocks * blockSize,
             maxChunks = 4,

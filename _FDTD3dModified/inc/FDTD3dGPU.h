@@ -9,8 +9,10 @@
  *
  */
 
+
 #ifndef _FDTD3DGPU_H_
 #define _FDTD3DGPU_H_
+
 
 #include <cstddef>
 #if defined(WIN32) || defined(_WIN32) || defined(WIN64) || defined(_WIN64) && defined(_MSC_VER)
@@ -20,11 +22,22 @@ typedef unsigned __int64 memsize_t;
 typedef uint64_t memsize_t;
 #endif
 
-// TODO : Rescale these values to CUDA 3.2 version of computing capabilities.
-#define k_blockDimX    32
+#include "FDTD3dShared.h"
+
+
+// TODO (DONE) : Rescale these values to CUDA 3.2 version of \
+//                computing capabilities:                     
+#define k_blockDimX    2
+#define k_blockDimY    2
 #define k_blockDimMaxY 16
-#define k_blockSizeMin 128
+#define k_blockSizeMin 4
 #define k_blockSizeMax (k_blockDimX * k_blockDimMaxY)
+#define k_gridDimX    2
+#define k_gridDimY    2
+#define k_gridDimMaxY 4
+#define k_gridSizeMin 4
+#define k_gridSizeMax (k_gridDimX * k_gridDimMaxY)
+
 
 struct structReloadMemChunkArgs
 {
@@ -36,25 +49,35 @@ struct structReloadMemChunkArgs
   float *output,
         *bufferSrc,
         *bufferIn;
-}
+};
 
 struct structKernelPThreadArgs
 {
   const int dimx,
             dimy,
             dimz;
-  const float *input;
+  const FieldComponents_t ***input;
+  const xyz_t **TFSFsrcE;
+  const xyz_t **TFSFsrcH;
 
   int dimGrid,
       dimBlock,
       maxSharedMemPerBlock;
   float *output;
-}
+};
 
 typedef struct structKernelPThreadArgs KernelPThreadArgs_t;
 
 bool getTargetDeviceGlobalMemSize(int *totalblockspermp, int *totalthreadspermp, int *totalmps, memsize_t *totalmem, const int argc, const char **argv);
-bool fdtdGPU ( float *output, const float *input, const float *coeff, const int dimx, const int dimy, const int dimz, const int radius, const int timesteps, const int argc, const char **argv, int blockSize, int blockXSize );
+bool fdtdGPU ( float *, const float *,             \
+               const xyz_t ***,                    \
+               const UpdateCoefficients_t &,       \
+               const int , const int , const int , \
+               const int , const int ,             \
+               const int , const char **,          \
+               int , int                           \
+             );                                     
 void * launchKernelPThreadAsync ( void * );
+
 
 #endif

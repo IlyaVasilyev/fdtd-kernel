@@ -4,14 +4,14 @@
 #define _TESTKERNELGLOBAL_CUH_
 
 
-// TODO : move all consts to const memory.
-// (OPTIONAL. CRITICAL ONLY WITH FDTD IMPLEMENTED INSIDE KERNEL)
+// TODO : Move all consts to const memory.              \
+//         CRITICAL WITH FDTD IMPLEMENTED INSIDE KERNEL  
 
-// TODO : I AM HERE (17.07.16) CRITICAL : FIX ANOTHER ERROR!!!            \
-//                                         Shared memory is different for \
-//                                         2 different streams!!!          
-// TODO : I AM HERE (28.07.16) : Threads, pthreads, streams, or processes \
-//                                hangs.                                   
+// TODO (DONE) : CRITICAL : FIX ANOTHER ERROR!!!            \
+//                           Shared memory is different for \
+//                           2 different streams!!!          
+// TODO (DONE) : Threads, pthreads, streams, or processes \
+//                hangs.                                   
 extern __shared__ char memPack []; /* Test: 16 * 16 * 24 bytes. */
 
 // TODO : Ensure that control stream do not wait for threads while they \
@@ -151,9 +151,11 @@ __global__ void testKernel ( TestKernelArguments_t args )
   unsigned char *deviceWaitWhileLoadingGlobalChunk =      \
                   args.deviceWaitWhileLoadingGlobalChunk,  
                 *deviceGlobalRefreshFlags = args.deviceGlobalRefreshFlags;
-  // TODO (IMPORTANT and INTERESTING) : Figure out why reference types \
-  //                                     behaves as register pointers  \
-  //                                     in CUDA:                       
+  // TODO (IMPORTANT and INTERESTING) (DONE) : Figure out why reference types \
+  //                                           behaves as register pointers   \
+  //                                           in CUDA: all function          \
+  //                                           call parameters do not saved   \
+  //                                           in device memory.               
   const int /*&dimx          = args.dimx,*/
             /* `dimx' is whole XxY blocks global memory slices !!! */
             /*  e.g. slice No 1, slice No 2, ... , slice No N.     */
@@ -188,13 +190,13 @@ __global__ void testKernel ( TestKernelArguments_t args )
   /* STEP6 : Waiting when main process sets continuation flag. */
   // TODO (DONE) : FIX CRITICAL ERROR : Loop does not count \
   //                                     timesteps:          
-  // TODO I AM HERE (09.03.16) : FIX AN ERROR : Implement an empty loop     \
-  //                                             that waits for `bContinue' \
-  //                                             flag:                       
-  // TODO : Use loop with timesteps instead of bContinue flag:
-  // TODO : Put here global loop over all global memory CHUNCKS \
-  //         (index is irrelevant - host responsible for        \
-  //         proper memory loading and unloading):               
+  // TODO (DONE) : FIX AN ERROR : Implement an empty loop     \
+  //                               that waits for `bContinue' \
+  //                               flag:                       
+  // TODO (DONE) : Use loop with timesteps instead of bContinue flag:
+  // TODO (DONE) : Put here global loop over all global memory CHUNCKS \
+  //                (index is irrelevant - host responsible for        \
+  //                proper memory loading and unloading):               
   while ( !*(args.bContinue) ) {}
   for ( int timestep = 0; timestep < args.timesteps; timestep++ )
   {

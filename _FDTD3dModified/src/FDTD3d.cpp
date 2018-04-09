@@ -92,11 +92,12 @@ typedef float2darray_t(f2da_t,VOLUME_SHARED,VOLUME_SHARED);
 bool runTest(int argc, const char **argv)
 {
     //unsigned char **coeff;
-    FieldComponents *host_output_;
-    float *device_output;
-    FieldComponents *input_;
-    float *host_output;
-    float *input;
+    FieldComponents_t *host_output_;
+    FieldComponents_t *device_output;
+    FieldComponents_t *input_;
+    FieldComponents_t *host_output;
+    FieldComponents_t *input;
+    FieldComponents_t ***inputTFSFsrc;
     //float *coeffRanges;
     float *coeff;
     float3x3Tens_t **epsion_volume;
@@ -106,6 +107,7 @@ bool runTest(int argc, const char **argv)
     void *tmpGenRef;
 
     int defaultDim;
+    /* TODO : Be carefull when copying sources from testFDTDGPU - the meaning of `dim..' in those source are slightly different from the one used below. In testFDTDGPU they are memory chunk or slice dimensions,  and here - they are just counts of working cells in FDTD grid. */
     int dimx;
     int dimy;
     int dimz;
@@ -250,9 +252,9 @@ bool runTest(int argc, const char **argv)
     // Allocate memory
     host_output_ = new FieldComponents(1, volumeSize, volumeSize, volumeSize);
     input_ = new FieldComponents(0, volumeSize, volumeSize, volumeSize);
-    host_output = (float *)calloc(volumeSize, sizeof(float));
-    input       = (float *)malloc(volumeSize * sizeof(float));
-    coeff       = (float *)malloc((radius + 1) * sizeof(float));
+    host_output = (FieldComponents_t *)calloc(volumeSize, sizeof(FieldComponents_t));
+    input       = (FieldComponents_t *)malloc(volumeSize * sizeof(FieldComponents_t));
+    coeff       = (FieldComponents_t *)malloc((radius + 1) * sizeof(FieldComponents_t));
 
     // Create coefficients
     // Update coefficients and PML sigmas
@@ -322,22 +324,44 @@ bool runTest(int argc, const char **argv)
         }
     }
 
-    // Generate data
-    printf(" generateRandomData\n\n");
-    generateRandomData(input, outerDimx, outerDimy, outerDimz, lowerBound, upperBound);
+    // TODO : I AM HERE (01.10.16) : Implement data generation for \
+    //                                TFSF sources:                 
+    // Generate data:
+    printf ( "generateRandomData\n\n" );
+    generateRandomData ( input, outerDimx, outerDimy, outerDimz, \
+                         lowerBound, upperBound                  \
+                       );                                         
+
+    // TODO : I AM HERE (03.10.16) : Implement `inputTFSFsrc' handling      \
+    //                                through out all procedures and kerels \
+    //                                which contain input source            \
+    //                                calculations:                          
+    printf ( "Genrating sinusoidal source...\n\n" );
+    generateSinSource ( inputTFSFsrc, dimx, dimy, timesteps, \
+                        srcOmega, wgLength, wgRadius, T      \
+                      );                                      
+
     printf("FDTD on %d x %d x %d volume with symmetric filter radius %d for %d timesteps...\n\n", dimx, dimy, dimz, radius, timesteps);
 
     // Execute on the host
     printf("fdtdReference...\n");
+    // TODO : Pass `inputTFSFsrc' as a parameter to function `fdtdReference':
     fdtdReference(host_output_, input_, ucLinearWG, dimx, dimy, dimz, radius, timesteps);
     printf("fdtdReference complete\n");
 
     // Allocate memory
-    device_output = (float *)calloc(volumeSize, sizeof(float));
+    device_output = (FieldComponents_t ***)calloc(volumeSize, sizeof(FieldComponents_t));
 
-    // Execute on the device
+    // TODO (23.11.16) : Change `float *' to `FieldComponents_t *':
+    // Execute on the device:
     printf("fdtdGPU...\n");
-    fdtdGPU ( device_output, input, coeff, dimx, dimy, dimz, radius, timesteps, argc, argv, totalthreadsperblock, totalxthreadsperblock );
+    fdtdGPU ( device_output, input, inputTFSFsrc, ucLinearWG, \
+              dimx, dimy, dimz, radius,                       \
+              timesteps,                                      \
+              argc, argv,                                     \
+              totalthreadsperblock,                           \
+              totalxthreadsperblock                           \
+            );                                                 
     printf("fdtdGPU complete\n");
 
     // Compare the results

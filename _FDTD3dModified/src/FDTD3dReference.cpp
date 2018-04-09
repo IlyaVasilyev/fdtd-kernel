@@ -13,7 +13,7 @@
 #include "FDTD3dReference.h"
 
 #include <cstdlib>
-#include <cmath>
+#include <math.h>
 #include <iostream>
 #include <iomanip>
 #include <stdio.h>
@@ -34,6 +34,44 @@ void generateRandomData(float *data, const int dimx, const int dimy, const int d
             }
         }
     }
+}
+
+// TODO : Include H and D source data into `FieldComponents_t ***sourceData':
+// The parameter `sourceData' has three dimensions: \
+//  last two are used for tile reference frame,     \
+//  and the first one - for time reference frame,   \
+//  e.g. it represents tiles over time:              
+void generateSinSource ( xyz_t ***sourceData, const int dimx, const int dimy, \
+                         const int timesteps, const float srcOmega,           \
+                         const float wgLength, const float wgRadius,          \
+                         const float T                                        \
+                       )                                                       
+{
+  // TODO (DONE) : Continue to implement code for source generation:
+  float iFrame, jFrame,
+        y,
+        rho, sin_phi,
+        phase;
+
+  for ( int timestep = 0; timestep < timesteps; timestep++ )
+    for ( int i = 0; i < dimx; i++ )
+      for ( int j = 0; j < dimy; j++ )
+      {
+        iFrame = i-dimx;
+        jFrame = j-dimy;
+        y = abs(jFrame)/dimy;
+        rho = sqrt ( pow(wgLength, 2)                                  \
+                     * ( pow (2 * abs(iFrame) / dimx, 2) + pow(y, 2) ) \
+                   );                                                   
+        sin_phi = wgLength*y / rho;
+
+        phase = sin_phi * sin ( 2*M_PI * rho / (wgRadius/10) ) \
+                * sin ( srcOmega * timestep/T );                
+
+        sourceData[timestep][i][j].X = 0;
+        sourceData[timestep][i][j].Y = 0;
+        sourceData[timestep][i][j].Z = phase;
+      }
 }
 
 void generatePatternData(float *data, const int dimx, const int dimy, const int dimz, const float lowerBound, const float upperBound)
@@ -118,8 +156,9 @@ bool fdtdReference(FieldComponents_t *output, const FieldComponents_t *input, co
     // Run the FDTD (naive method)
     printf(" Host FDTD loop\n");
 
-    // In timeframe we need to advance by half-timestep due to different
-    // steps in H and D and also in E and B fields update equations
+    // In a timeframe we need to advance by half-timestep due to different \
+    //  steps in update equations associated with H and D and              \
+    //  also E and B fields:                                                
     dimzNearPML = dimz - 1;
     dimyNearPML = dimy - 1;
     dimxNearPML = dimx - 1;

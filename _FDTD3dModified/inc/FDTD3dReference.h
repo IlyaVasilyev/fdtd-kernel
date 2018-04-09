@@ -13,6 +13,11 @@
 #define _FDTD3DREFERENCE_H_
 
 void generateRandomData(float *data, const int dimx, const int dimy, const int dimz, const float lowerBound, const float upperBound);
+void generateSinSource ( xyz_t *** , const int , const int , \
+                         const int , const float ,          \
+                         const float , const float ,        \
+                         const float                        \
+                       );                                    
 void generatePatternData(float *data, const int dimx, const int dimy, const int dimz, const float lowerBound, const float upperBound);
 //bool fdtdReference(float *output, const float *input, const float *coeff, const int dimx, const int dimy, const int dimz, const int radius, const int timesteps);
 bool fdtdReference(FieldComponents_t *output, const FieldComponents_t *input, const UpdateCoefficients_t updateCoeffs, const int dimx, const int dimy, const int dimz, const int radius, const int timesteps);
