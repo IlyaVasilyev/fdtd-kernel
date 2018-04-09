@@ -1,0 +1,1 @@
+export dbg=1 && export prof=1 && make all dbg=1 prof=1
